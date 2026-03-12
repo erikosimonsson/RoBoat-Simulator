@@ -3,278 +3,577 @@
 #include <math.h>
 #include <stdbool.h>
 #include <float.h>
+#include <string.h>
 
-#define MAX_ENVIRON_HEIGHT 10
-#define MAX_ENVIRON_WIDTH 10
 #define INF DBL_MAX
-
-typedef struct Node {
-    int x, y;
-    double g, h, f;
-    int px, py;
-    bool closed, opened;
-} Node;
 
 typedef struct {
     int x, y;
 } Point;
 
-static int grid[MAX_ENVIRON_HEIGHT][MAX_ENVIRON_WIDTH] = {
-    {0,0,0,0,0,0,0,0,0,0},
-    {0,1,1,1,0,0,0,0,0,0},
-    {0,0,0,1,0,0,0,0,0,0},
-    {0,0,0,1,0,0,1,1,1,0},
-    {0,0,0,0,0,0,0,0,1,0},
-    {0,0,0,0,1,1,1,0,1,0},
-    {0,0,0,0,0,0,0,0,1,0},
-    {0,0,1,1,1,1,0,0,0,0},
-    {0,0,0,0,0,0,0,1,1,0},
-    {0,0,0,0,0,0,0,0,0,0}
-};
+typedef struct {
+    int x, y;
+    double g, h, f;
+    int px, py;
+    bool opened, closed;
+    int heap_index;
+} Node;
 
-static Node nodes[MAX_ENVIRON_HEIGHT][MAX_ENVIRON_WIDTH];
+typedef struct {
+    Node **data;
+    int size;
+    int capacity;
+} MinHeap;
 
-static const int dx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
-static const int dy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
+static void heap_swap(MinHeap *heap, int i, int j);
+static void heap_sift_up(MinHeap *heap, int i);
+static void heap_sift_down(MinHeap *heap, int i);
+static bool heap_init(MinHeap *heap, int capacity);
+static void heap_free(MinHeap *heap);
+static void heap_push(MinHeap *heap, Node *node);
+static Node *heap_pop_min(MinHeap *heap);
+static void heap_decrease_key(MinHeap *heap, Node *node);
 
-bool in_bounds(int x, int y) {
-    return x >= 0 && x < MAX_ENVIRON_WIDTH && y >= 0 && y < MAX_ENVIRON_HEIGHT;
+static inline int grid_at(const int *grid, int width, int x, int y) {
+    return grid[y * width + x];
 }
 
-bool is_blocked(int x, int y) {
-    return !in_bounds(x, y) || grid[y][x] != 0;
+static inline Node *node_at(Node *nodes, int width, int x, int y) {
+    return &nodes[y * width + x];
 }
 
-double heuristic(int x1, int y1, int x2, int y2) {
+static bool in_bounds(int x, int y, int width, int height) {
+    return x >= 0 && x < width && y >= 0 && y < height;
+}
+
+static bool is_blocked(const int *grid, int width, int height, int x, int y) {
+    return !in_bounds(x, y, width, height) || grid_at(grid, width, x, y) != 0;
+}
+
+static double distance_between(int x1, int y1, int x2, int y2) {
     double dx = (double)(x2 - x1);
     double dy = (double)(y2 - y1);
     return sqrt(dx * dx + dy * dy);
 }
 
-double distance_between(int x1, int y1, int x2, int y2) {
-    return heuristic(x1, y1, x2, y2);
+static double heuristic(int x1, int y1, int x2, int y2) {
+    return distance_between(x1, y1, x2, y2);
 }
 
-/**
- * Bresenham style traversal
- * Returns true if the segment from (x0, y0) to (x1, y1) does not cross blocked cells
- */
-bool line_of_sight(int x0, int y0, int x1, int y1) {
-    int dx = abs(x1 - x0);
-    int dy = abs(y1 - y0);
-    int sx = (x0 < x1) ? 1 : -1;
-    int sy = (y0 < y1) ? 1 : -1;
-    int err = dx - dy;
-    int x = x0, y = y0;
-
-    while (true) {
-        if(is_blocked(x, y)) {
+static bool can_step(const int *grid, int width, int height, int x1, int y1, int x2, int y2) {
+    if (!in_bounds(x2, y2, width, height) || is_blocked(grid, width, height, x2, y2)) {
+        return false;
+    }
+    int dx = x2 - x1;
+    int dy = y2 - y1;
+    if (dx != 0 && dy != 0) {
+        if (is_blocked(grid, width, height, x1 + dx, y1) || is_blocked(grid, width, height, x1, y1 + dy)) {
             return false;
-        }
-        if(x == x1 && y == y1) {
-            break;
-        }
-
-        int e2 = 2 * err;
-
-        if(e2 > -dy) {
-            err -= dy;
-            x += sx;
-        }
-        if(e2 < dx) {
-            err += dx;
-            y += sy;
         }
     }
     return true;
 }
 
-/**
- * Very simple open list:
- * scan all nodes and pick the lowest f among opened and not closed
- * Slow, but easy to understand
- */
-Node* get_best_open_node(void) {
-    Node* best = NULL;
-    for(int y = 0; y < MAX_ENVIRON_HEIGHT; y++) {
-        for(int x = 0; x < MAX_ENVIRON_WIDTH; x++) {
-            Node* n = &nodes[y][x];
-            if(n->opened && !n->closed) {
-                if(best == NULL || n->f < best->f) {
-                    best = n;
-                }
-            }
+static bool line_of_sight(const int *grid, int width, int height, int x1, int y1, int x2, int y2) {
+    int dx = abs(x2 - x1);
+    int dy = abs(y2 - y1);
+    int sx = (x2 > x1) ? 1 : -1;
+    int sy = (y2 > y1) ? 1 : -1;
+    int err = dx - dy;
+    int x = x1, y = y1;
+
+    while (x != x2 || y != y2) {
+        int prev_x = x, prev_y = y;
+        int err2 = err * 2;
+        if (err2 > -dy) {
+            err -= dy;
+            x += sx;
+        }
+        if (err2 < dx) {
+            err += dx;
+            y += sy;
+        }
+        if (!can_step(grid, width, height, prev_x, prev_y, x, y)) {
+            return false;
         }
     }
-    return best;
+    return true;
 }
 
-void init_nodes(int goal_x, int goal_y) {
-    for(int y = 0; y < MAX_ENVIRON_HEIGHT; y++) {
-        for(int x = 0; x < MAX_ENVIRON_WIDTH; x++) {
-            nodes[y][x].x = x;
-            nodes[y][x].y = y;
-            nodes[y][x].g = INF;
-            nodes[y][x].h = heuristic(x, y, goal_x, goal_y);
-            nodes[y][x].f = INF;
-            nodes[y][x].px = x;
-            nodes[y][x].py = y;
-            nodes[y][x].closed = false;
-            nodes[y][x].opened = false;
+static void init_nodes(Node *nodes, int width, int height, int goal_x, int goal_y) {
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            Node *node = node_at(nodes, width, x, y);
+            node->x = x;
+            node->y = y;
+            node->g = INF;
+            node->h = heuristic(x, y, goal_x, goal_y);
+            node->f = INF;
+            node->px = x;
+            node->py = y;
+            node->opened = false;
+            node->closed = false;
+            node->heap_index = -1;
         }
     }
 }
 
-void update_vertex(Node* current, Node* neighbor) {
-    Node* parent = &nodes[current->py][current->px];
+static void update_vertex(const int *grid, int width, int height, Node *nodes, MinHeap *open_heap, Node *current, Node *neighbor) {
+    Node *parent = node_at(nodes, width, current->px, current->py);
 
-    if(line_of_sight(parent->x, parent->y, neighbor->x, neighbor->y)) {
+    if (line_of_sight(grid, width, height, parent->x, parent->y, neighbor->x, neighbor->y)) {
         double new_g = parent->g + distance_between(parent->x, parent->y, neighbor->x, neighbor->y);
-        if(new_g < neighbor->g) {
+        if (new_g < neighbor->g) {
             neighbor->g = new_g;
             neighbor->px = parent->x;
             neighbor->py = parent->y;
             neighbor->f = neighbor->g + neighbor->h;
-            neighbor->opened = true;
+            if (!neighbor->opened) {
+                neighbor->opened = true;
+                heap_push(open_heap, neighbor);
+            }
+            else {
+                heap_decrease_key(open_heap, neighbor);
+            }
         }
     }
     else {
         double new_g = current->g + distance_between(current->x, current->y, neighbor->x, neighbor->y);
-        if(new_g < neighbor->g) {
+        if (new_g < neighbor->g) {
             neighbor->g = new_g;
             neighbor->px = current->x;
             neighbor->py = current->y;
             neighbor->f = neighbor->g + neighbor->h;
-            neighbor->opened = true;
+            if (!neighbor->opened) {
+                neighbor->opened = true;
+                heap_push(open_heap, neighbor);
+            }
+            else {
+                heap_decrease_key(open_heap, neighbor);
+            }
         }
     }
 }
 
-bool reconstruct_path(int start_x, int start_y, int goal_x, int goal_y, Point* path, int* path_length) {
-    int max_path = MAX_ENVIRON_WIDTH * MAX_ENVIRON_HEIGHT;
+static bool reconstruct_path(Node *nodes, int width, int height, int start_x, int start_y, int goal_x, int goal_y, Point *path, int *path_length) {
+    int max_path = width * height;
     int count = 0;
-
-    int cx = goal_x;
-    int cy = goal_y;
-
-    while(!(cx == start_x && cy == start_y)) {
-        if(count >= max_path) {
+    int cx = goal_x, cy = goal_y;
+    while (!(cx == start_x && cy == start_y)) {
+        if (count >= max_path) {
             return false;
         }
         path[count++] = (Point){cx, cy};
-
-        Node* n = &nodes[cy][cx];
-        if(n->px == cx && n->py == cy) {
+        Node *node = node_at(nodes, width, cx, cy);
+        if (node->px == cx && node->py == cy) {
             return false;
         }
-
-        int nx = n->px;
-        int ny = n->py;
-        cx = nx;
-        cy = ny;
+        cx = node->px;
+        cy = node->py;
     }
-
     path[count++] = (Point){start_x, start_y};
-
-    for(int i = 0; i < count / 2; i++) {
-        Point temp = path[i];
+    for (int i = 0; i < count / 2; i++) {
+        Point tmp = path[i];
         path[i] = path[count - 1 - i];
-        path[count - 1 - i] = temp;
+        path[count - 1 - i] = tmp;
     }
-
     *path_length = count;
+    (void)height;
     return true;
 }
 
-bool theta_star(int start_x, int start_y, int goal_x, int goal_y, Point* path, int* path_length) {
-    if(is_blocked(start_x, start_y) || is_blocked(goal_x, goal_y)) {
+bool theta_star(const int *grid, int width, int height, int start_x, int start_y, int goal_x, int goal_y, Point *path, int *path_length, double *path_cost) {
+    static const int dx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+    static const int dy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
+
+    if (!grid || !path || !path_length) {
         return false;
     }
+    if (!in_bounds(start_x, start_y, width, height) || !in_bounds(goal_x, goal_y, width, height)) {
+        return false;
+    }
+    if (is_blocked(grid, width, height, start_x, start_y) || is_blocked(grid, width, height, goal_x, goal_y)) {
+        return false;
+    }
+    Node *nodes = malloc((size_t)width * height * sizeof(Node));
+    if (!nodes) {
+        return false;
+    }
+    MinHeap open_heap;
+    if (!heap_init(&open_heap, width * height)) {
+        free(nodes);
+        return false;
+    }
+    init_nodes(nodes, width, height, goal_x, goal_y);
+    Node *start_node = node_at(nodes, width, start_x, start_y);
+    start_node->g = 0.0;
+    start_node->f = start_node->h;
+    start_node->px = start_x;
+    start_node->py = start_y;
+    start_node->opened = true;
+    heap_push(&open_heap, start_node);
 
-    init_nodes(goal_x, goal_y);
-
-    Node* start = &nodes[start_y][start_x];
-    start->g = 0.0;
-    start->f = start->h;
-    start->px = start_x;
-    start->py = start_y;
-    start->opened = true;
-
-    while(true) {
-        Node* current = get_best_open_node();
-        if(current == NULL) {
+    while (true) {
+        Node *current = heap_pop_min(&open_heap);
+        if (current == NULL) {
+            heap_free(&open_heap);
+            free(nodes);
             return false;
         }
-
-        if(current->x == goal_x && current->y == goal_y) {
-            return reconstruct_path(start_x, start_y, goal_x, goal_y, path, path_length);
+        if (current->closed) {
+            continue;
         }
-
+        if (current->x == goal_x && current->y == goal_y) {
+            bool result = reconstruct_path(nodes, width, height, start_x, start_y, goal_x, goal_y, path, path_length);
+            if (result && path_cost) {
+                *path_cost = current->g;
+            }
+            heap_free(&open_heap);
+            free(nodes);
+            return result;
+        }
         current->closed = true;
 
-        for(int i = 0; i < 8; i++) {
+        for (int i = 0; i < 8; i++) {
             int nx = current->x + dx[i];
             int ny = current->y + dy[i];
-
-            if(!in_bounds(nx, ny) || is_blocked(nx, ny)) {
+            if (!can_step(grid, width, height, current->x, current->y, nx, ny)) {
                 continue;
             }
-
-            Node* neighbor = &nodes[ny][nx];
-            if(neighbor->closed) {
+            Node *neighbor = node_at(nodes, width, nx, ny);
+            if (neighbor->closed) {
                 continue;
             }
-
-            if(!neighbor->opened) {
-                neighbor->g = INF;
-                neighbor->px = nx;
-                neighbor->py = ny;
-            }
-
-            update_vertex(current, neighbor);
+            update_vertex(grid, width, height, nodes, &open_heap, current, neighbor);
         }
     }
 }
 
-void print_grid_with_path(Point* path, int path_length, int start_x, int start_y, int goal_x, int goal_y) {
-    char display[MAX_ENVIRON_HEIGHT][MAX_ENVIRON_WIDTH];
+static void draw_segment(char *display, int width, int height, int x1, int y1, int x2, int y2) {
+    int dx = abs(x2 - x1);
+    int dy = abs(y2 - y1);
+    int sx = (x1 < x2) ? 1 : -1;
+    int sy = (y1 < y2) ? 1 : -1;
+    int err = dx - dy;
+    int x = x1, y = y1;
 
-    for(int y = 0; y < MAX_ENVIRON_HEIGHT; y++) {
-        for(int x = 0; x < MAX_ENVIRON_WIDTH; x++) {
-            display[y][x] = (grid[y][x] == 0) ? '#' : '.';
+    while (true) {
+        if (in_bounds(x, y, width, height) && display[y * width + x] == '.') {
+            display[y * width + x] = '+';
+        }
+        if (x == x2 && y == y2) {
+            break;
+        }
+        int err2 = err * 2;
+        if (err2 > -dy) {
+            err -= dy;
+            x += sx;
+        }
+        if (err2 < dx) {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+void print_grid_with_path(const int *grid, int width, int height, const Point *path, int path_length, int start_x, int start_y, int goal_x, int goal_y) {
+    char *display = malloc((size_t)width * height);
+    if (!display) {
+        return;
+    }
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            display[y * width + x] = grid_at(grid, width, x, y) == 0 ? '.' : '#';
         }
     }
 
-    for(int i = 0; i < path_length; i++) {
-        int x = path[i].x;
-        int y = path[i].y;
-        display[y][x] = '*';
+    for (int i = 0; i < path_length - 1; i++) {
+        draw_segment(display, width, height, path[i].x, path[i].y, path[i + 1].x, path[i + 1].y);
     }
 
-    display[start_y][start_x] = 'S';
-    display[goal_y][goal_x] = 'G';
+    for (int i = 0; i < path_length; i++) {
+        int x = path[i].x;
+        int y = path[i].y;
+        if (in_bounds(x, y, width, height)) {
+            display[y * width + x] = 'W';
+        }
+    }
+    display[start_y * width + start_x] = 'S';
+    display[goal_y * width + goal_x] = 'G';
 
-    for(int y = 0; y < MAX_ENVIRON_HEIGHT; y++) {
-        for(int x = 0; x < MAX_ENVIRON_WIDTH; x++) {
-            printf("%c ", display[y][x]);
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            printf("%c ", display[y * width + x]);
         }
         printf("\n");
     }
+    free(display);
 }
 
-int main(void) {
-    int start_x = 0, start_y = 0;
-    int goal_x = 9, goal_y = 9;
-
-    Point path[MAX_ENVIRON_WIDTH * MAX_ENVIRON_HEIGHT];
-    int path_length = 0;
-
-    if(theta_star(start_x, start_y, goal_x, goal_y, path, &path_length)) {
-        printf("Path found! Length: %d\n", path_length);
-        print_grid_with_path(path, path_length, start_x, start_y, goal_x, goal_y);
-    } else {
-        printf("No path found.\n");
+static bool load_grid_from_file(const char *filename, int **grid, int *width, int *height, int *start_x, int *start_y, int *goal_x, int *goal_y) {
+    FILE *file = fopen(filename, "r");
+    if (!file) {
+        fprintf(stderr, "Error: could not open file %s\n", filename);
+        return false;
     }
 
+    char line[4096];
+    int w = -1;
+    int h = 0;
+    int capacity = 0;
+    int *g = NULL;
+    bool found_start = false;
+    bool found_goal = false;
+
+    while (fgets(line, sizeof(line), file)) {
+        size_t len = strcspn(line, "\r\n");
+        line[len] = '\0';
+        if (len == 0) {
+            continue;  // skip empty lines
+        }
+        if (w == -1) {
+            w = (int)len;
+            if (w <= 0) {
+                fprintf(stderr, "Error: invalid map width\n");
+                fclose(file);
+                return false;
+            }
+        } 
+        else if ((int)len != w) {
+            fprintf(stderr, "Error: inconsistent row width at row %d\n", h);
+            free(g);
+            fclose(file);
+            return false;
+        }
+        if ((h + 1) * w > capacity) {
+            int new_capacity = (capacity == 0) ? (w * 8) : (capacity * 2);
+            while (new_capacity < (h + 1) * w) {
+                new_capacity *= 2;
+            }
+            int *new_grid = realloc(g, (size_t)new_capacity * sizeof(int));
+            if (!new_grid) {
+                fprintf(stderr, "Error: memory allocation failed\n");
+                free(g);
+                fclose(file);
+                return false;
+            }
+            g = new_grid;
+            capacity = new_capacity;
+        }
+
+        for (int x = 0; x < w; x++) {
+            char c = line[x];
+            switch (c) {
+                case '0':
+                    g[h * w + x] = 0;
+                    break;
+                case '1':
+                    g[h * w + x] = 1;
+                    break;
+                case 'S':
+                    if (found_start) {
+                        fprintf(stderr, "Error: multiple S cells found\n");
+                        free(g);
+                        fclose(file);
+                        return false;
+                    }
+                    found_start = true;
+                    *start_x = x;
+                    *start_y = h;
+                    g[h * w + x] = 0;
+                    break;
+                case 'G':
+                    if (found_goal) {
+                        fprintf(stderr, "Error: multiple G cells found\n");
+                        free(g);
+                        fclose(file);
+                        return false;
+                    }
+                    found_goal = true;
+                    *goal_x = x;
+                    *goal_y = h;
+                    g[h * w + x] = 0;
+                    break;
+                default:
+                    fprintf(stderr, "Error: invalid character '%c' at row %d, col %d\n", c, h, x);
+                    free(g);
+                    fclose(file);
+                    return false;
+            }
+        }
+        h++;
+    }
+    fclose(file);
+    if (w <= 0 || h <= 0) {
+        fprintf(stderr, "Error: empty map file\n");
+        free(g);
+        return false;
+    }
+    if (!found_start) {
+        fprintf(stderr, "Error: no S found in map\n");
+        free(g);
+        return false;
+    }
+    if (!found_goal) {
+        fprintf(stderr, "Error: no G found in map\n");
+        free(g);
+        return false;
+    }
+    *grid = g;
+    *width = w;
+    *height = h;
+    return true;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        printf("Usage:\n");
+        printf("  ./theta_star map.txt\n");
+        return 1;
+    }
+    const char *filename = argv[1];
+    int *grid = NULL;
+    int width = 0, height = 0;
+    int start_x = -1, start_y = -1;
+    int goal_x = -1, goal_y = -1;
+    if (!load_grid_from_file(
+            filename,
+            &grid,
+            &width,
+            &height,
+            &start_x,
+            &start_y,
+            &goal_x,
+            &goal_y)) {
+        return 1;
+    }
+    Point *path = malloc((size_t)width * height * sizeof(Point));
+    if (!path) {
+        fprintf(stderr, "Error: memory allocation failed.\n");
+        free(grid);
+        return 1;
+    }
+    int path_length = 0;
+    double path_cost = 0.0;
+    bool path_found = theta_star(
+        grid, width, height,
+        start_x, start_y,
+        goal_x, goal_y,
+        path, &path_length, &path_cost
+    );
+
+    if (path_found) {
+        printf("Path found\n");
+        printf("Map size: %d x %d\n", width, height);
+        printf("Start: (%d, %d)\n", start_x, start_y);
+        printf("Goal: (%d, %d)\n", goal_x, goal_y);
+        printf("Waypoint count: %d\n", path_length);
+        printf("Path cost: %.3f\n", path_cost);
+        print_grid_with_path(
+            grid, width, height,
+            path, path_length,
+            start_x, start_y,
+            goal_x, goal_y
+        );
+    } else {
+        printf("No path found\n");
+    }
+    free(path);
+    free(grid);
     return 0;
+}
+
+//#------------------- MinHeap helper functions ------------------#
+
+static void heap_swap(MinHeap *heap, int i, int j) {
+    Node *tmp = heap->data[i];
+    heap->data[i] = heap->data[j];
+    heap->data[j] = tmp;
+
+    heap->data[i]->heap_index = i;
+    heap->data[j]->heap_index = j;
+}
+
+static void heap_sift_up(MinHeap *heap, int i) {
+    while (i > 0) {
+        int p = (i - 1) / 2;
+        if (heap->data[p]->f <= heap->data[i]->f) {
+            break;
+        }
+        heap_swap(heap, i, p);
+        i = p;
+    }
+}
+
+static void heap_sift_down(MinHeap *heap, int i) {
+    while (true) {
+        int left = 2 * i + 1;
+        int right = 2 * i + 2;
+        int smallest = i;
+
+        if (left < heap->size && heap->data[left]->f < heap->data[smallest]->f) {
+            smallest = left;
+        }
+        if (right < heap->size && heap->data[right]->f < heap->data[smallest]->f) {
+            smallest = right;
+        }
+        if (smallest == i) {
+            break;
+        }
+
+        heap_swap(heap, i, smallest);
+        i = smallest;
+    }
+}
+
+static bool heap_init(MinHeap *heap, int capacity) {
+    heap->data = malloc((size_t)capacity * sizeof(Node *));
+    if (!heap->data) {
+        return false;
+    }
+    heap->size = 0;
+    heap->capacity = capacity;
+    return true;
+}
+
+static void heap_free(MinHeap *heap) {
+    free(heap->data);
+    heap->data = NULL;
+    heap->size = 0;
+    heap->capacity = 0;
+}
+
+static void heap_push(MinHeap *heap, Node *node) {
+    if (heap->size >= heap->capacity) {
+        return;
+    }
+    heap->data[heap->size] = node;
+    node->heap_index = heap->size;
+    heap->size++;
+    heap_sift_up(heap, node->heap_index);
+}
+
+static Node *heap_pop_min(MinHeap *heap) {
+    if (heap->size == 0) {
+        return NULL;
+    }
+
+    Node *min = heap->data[0];
+    heap->size--;
+
+    if (heap->size > 0) {
+        heap->data[0] = heap->data[heap->size];
+        heap->data[0]->heap_index = 0;
+        heap_sift_down(heap, 0);
+    }
+
+    min->heap_index = -1;
+    return min;
+}
+
+static void heap_decrease_key(MinHeap *heap, Node *node) {
+    if (node->heap_index >= 0) {
+        heap_sift_up(heap, node->heap_index);
+    }
 }
