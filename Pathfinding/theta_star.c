@@ -277,14 +277,21 @@ static void draw_segment(char *display, int width, int height, int x1, int y1, i
 }
 
 void print_grid_with_path(const int *grid, int width, int height, const Point *path, int path_length, int start_x, int start_y, int goal_x, int goal_y) {
+    FILE *out = fopen("out.txt", "w");
+    if (!out) {
+        fprintf(stderr, "Error: could not open output file\n");
+        return;
+    }
     char *display = malloc((size_t)width * height);
     if (!display) {
+        fprintf(stderr, "Error: memory allocation failed\n");
+        fclose(out);
         return;
     }
 
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
-            display[y * width + x] = grid_at(grid, width, x, y) == 0 ? '.' : '#';
+            display[y * width + x] = (grid_at(grid, width, x, y) == 0) ? '.' : '#';
         }
     }
 
@@ -304,11 +311,12 @@ void print_grid_with_path(const int *grid, int width, int height, const Point *p
 
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
-            printf("%c ", display[y * width + x]);
+            fputc(display[y * width + x], out);
         }
-        printf("\n");
+        fputc('\n', out);
     }
     free(display);
+    fclose(out);
 }
 
 static bool load_grid_from_file(const char *filename, int **grid, int *width, int *height, int *start_x, int *start_y, int *goal_x, int *goal_y) {
@@ -330,7 +338,7 @@ static bool load_grid_from_file(const char *filename, int **grid, int *width, in
         size_t len = strcspn(line, "\r\n");
         line[len] = '\0';
         if (len == 0) {
-            continue;  // skip empty lines
+            continue;
         }
         if (w == -1) {
             w = (int)len;
@@ -365,10 +373,10 @@ static bool load_grid_from_file(const char *filename, int **grid, int *width, in
         for (int x = 0; x < w; x++) {
             char c = line[x];
             switch (c) {
-                case '0':
+                case '.':
                     g[h * w + x] = 0;
                     break;
-                case '1':
+                case '#':
                     g[h * w + x] = 1;
                     break;
                 case 'S':
@@ -427,11 +435,6 @@ static bool load_grid_from_file(const char *filename, int **grid, int *width, in
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) {
-        printf("Usage:\n");
-        printf("  ./theta_star map.txt\n");
-        return 1;
-    }
     const char *filename = argv[1];
     int *grid = NULL;
     int width = 0, height = 0;
@@ -464,18 +467,7 @@ int main(int argc, char **argv) {
     );
 
     if (path_found) {
-        printf("Path found\n");
-        printf("Map size: %d x %d\n", width, height);
-        printf("Start: (%d, %d)\n", start_x, start_y);
-        printf("Goal: (%d, %d)\n", goal_x, goal_y);
-        printf("Waypoint count: %d\n", path_length);
-        printf("Path cost: %.3f\n", path_cost);
-        print_grid_with_path(
-            grid, width, height,
-            path, path_length,
-            start_x, start_y,
-            goal_x, goal_y
-        );
+        print_grid_with_path(grid, width, height, path, path_length, start_x, start_y, goal_x, goal_y);
     } else {
         printf("No path found\n");
     }
